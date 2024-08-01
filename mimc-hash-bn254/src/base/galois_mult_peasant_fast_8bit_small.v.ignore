@@ -1,0 +1,1187 @@
+//  @author : Secure, Trusted, and Assured Microelectronics (STAM) Center
+//
+//  Copyright (c) 2024 STAM Center (SCAI/ASU)
+//  Permission is hereby granted, free of charge, to any person obtaining a copy
+//  of this software and associated documentation files (the "Software"), to deal
+//  in the Software without restriction, including without limitation the rights
+//  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//  copies of the Software, and to permit persons to whom the Software is
+//  furnished to do so, subject to the following conditions:
+//  The above copyright notice and this permission notice shall be included in
+//  all copies or substantial portions of the Software.
+//
+//  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+//  THE SOFTWARE.
+
+
+// Module that performs multiplication between two elements in Galois Field with Prime order.
+// Uses Russian peasant multiplication method (simultaneous multiplication and reduction).
+
+// Russian Peasant Multiplication Algorithm: https://en.wikipedia.org/wiki/Ancient_Egyptian_multiplication#Russian_peasant_multiplication
+//                                           https://en.wikipedia.org/wiki/Finite_field_arithmetic#C_programming_example
+
+module galois_mult_peasant_fast #(
+	parameter N_BITS = 254,
+	parameter PRIME_MODULUS = 254'h30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001 // Size: N_BITS
+) (
+	input clk,
+	input rst,
+	input en,
+	input  [N_BITS-1:0] num1,
+	input  [N_BITS-1:0] num2,
+	output [N_BITS-1:0] product,
+	output reg done
+);
+
+// LOCAL PARAMETERS
+
+// States of the state machine
+localparam INIT = 3'd1;
+localparam COMPUTE = 3'd2;
+localparam FINISH = 3'd3;
+
+// REGS AND WIRES DECLARATIONS
+
+// State machine registers
+reg [2-1:0] state, next_state;
+
+// Regs that store operands, intermediate results and final result
+reg [N_BITS-1:0] x1;
+reg [N_BITS-1:0] x2;
+reg [N_BITS-1:0] result;
+
+// Wires used in calculations
+wire [N_BITS-1:0] result_plus_x1_times_x2;
+wire [N_BITS-1:0] out1;
+wire [N_BITS-1:0] out2;
+wire [(N_BITS+8)-1:0] x1_times_x2;
+wire [(N_BITS+8)-1:0] x1_times_256;
+
+// Synchronization of the state machine
+always @ (posedge clk or posedge rst) begin
+	if (rst == 1)
+		state <= INIT;
+	else
+		state <= next_state;
+end
+
+// State transition logic of the state machine
+always @ (*) begin
+	case (state)
+		INIT:
+			next_state <= (en) ? COMPUTE : state;
+		COMPUTE:
+			next_state <= (x1 == 0 || x2 == 0) ? FINISH : state;
+		FINISH:
+			next_state <= state;
+		default:
+			next_state <= INIT;
+	endcase
+end
+
+// Operation logic in the various states
+always @(posedge clk) begin
+	case (state)
+		INIT: begin
+			x1 <= num1;
+			x2 <= num2;
+			done <= 1'b0;
+			result <= 0;
+		end
+		FINISH: begin
+			done <= 1'b1;
+		end
+		COMPUTE: begin
+			// result = result + x1*LowestEightBits(x2)
+			result <= result_plus_x1_times_x2;
+
+			// x1 = x1 * 2^8
+			x1 <= out2;
+
+			// x2 = x2 / 2^8
+			x2 <= x2 >> 8;
+		end
+	endcase
+
+	// $strobe("[galois_mult_peasant_fast.v] x1=%h", x1);
+	// $strobe("[galois_mult_peasant_fast.v] x2=%h", x2);
+	// $strobe("[galois_mult_peasant_fast.v]  r=%h", result);
+	// $strobe("[galois_mult_peasant_fast.v] sub_1=%h", REDUCE_2.sub_1 >= 0);
+	// $strobe("[galois_mult_peasant_fast.v] sub_255=%h", REDUCE_2.sub_255 >= 0);
+	// $strobe("[galois_mult_peasant_fast.v] sub_59=%h", REDUCE_2.sub_59 >= 0);
+	// $strobe("[galois_mult_peasant_fast.v] sub_58=%h", REDUCE_2.sub_58 >= 0);
+	// $strobe("[galois_mult_peasant_fast.v] sub_57=%h", REDUCE_2.sub_57 >= 0);
+end
+
+// Output result assignment
+assign product = result;
+assign x1_times_x2 = x1 * x2[8-1:0];
+
+assign x1_times_256 = x1 << 8;
+
+galois_add #(
+	.N_BITS(N_BITS)
+) GALOIS_ADD (
+	.num1(result),
+	.num2(out1),
+	.sum(result_plus_x1_times_x2)
+);
+
+reduce #(
+	.N_BITS(N_BITS),
+	.PRIME_MODULUS(PRIME_MODULUS)
+) REDUCE_1 (
+	.x_times_256(x1_times_x2),
+	.result(out1)
+);
+
+reduce #(
+	.N_BITS(N_BITS),
+	.PRIME_MODULUS(PRIME_MODULUS)
+) REDUCE_2 (
+	.x_times_256(x1_times_256),
+	.result(out2)
+);
+
+endmodule
+
+module reduce #(
+	parameter N_BITS = 254,
+	parameter PRIME_MODULUS = 254'h30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001 // Size: N_BITS
+) (
+	input [(N_BITS+8)-1:0] x_times_256,
+	output [N_BITS-1:0] result
+);
+
+localparam [(N_BITS+8)-1:0] M_1 = 1 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_2 = 2 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_3 = 3 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_4 = 4 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_5 = 5 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_6 = 6 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_7 = 7 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_8 = 8 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_9 = 9 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_10 = 10 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_11 = 11 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_12 = 12 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_13 = 13 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_14 = 14 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_15 = 15 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_16 = 16 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_17 = 17 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_18 = 18 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_19 = 19 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_20 = 20 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_21 = 21 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_22 = 22 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_23 = 23 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_24 = 24 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_25 = 25 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_26 = 26 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_27 = 27 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_28 = 28 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_29 = 29 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_30 = 30 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_31 = 31 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_32 = 32 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_33 = 33 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_34 = 34 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_35 = 35 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_36 = 36 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_37 = 37 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_38 = 38 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_39 = 39 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_40 = 40 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_41 = 41 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_42 = 42 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_43 = 43 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_44 = 44 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_45 = 45 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_46 = 46 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_47 = 47 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_48 = 48 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_49 = 49 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_50 = 50 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_51 = 51 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_52 = 52 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_53 = 53 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_54 = 54 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_55 = 55 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_56 = 56 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_57 = 57 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_58 = 58 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_59 = 59 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_60 = 60 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_61 = 61 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_62 = 62 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_63 = 63 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_64 = 64 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_65 = 65 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_66 = 66 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_67 = 67 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_68 = 68 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_69 = 69 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_70 = 70 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_71 = 71 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_72 = 72 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_73 = 73 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_74 = 74 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_75 = 75 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_76 = 76 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_77 = 77 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_78 = 78 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_79 = 79 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_80 = 80 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_81 = 81 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_82 = 82 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_83 = 83 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_84 = 84 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_85 = 85 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_86 = 86 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_87 = 87 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_88 = 88 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_89 = 89 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_90 = 90 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_91 = 91 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_92 = 92 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_93 = 93 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_94 = 94 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_95 = 95 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_96 = 96 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_97 = 97 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_98 = 98 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_99 = 99 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_100 = 100 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_101 = 101 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_102 = 102 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_103 = 103 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_104 = 104 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_105 = 105 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_106 = 106 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_107 = 107 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_108 = 108 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_109 = 109 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_110 = 110 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_111 = 111 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_112 = 112 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_113 = 113 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_114 = 114 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_115 = 115 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_116 = 116 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_117 = 117 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_118 = 118 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_119 = 119 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_120 = 120 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_121 = 121 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_122 = 122 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_123 = 123 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_124 = 124 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_125 = 125 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_126 = 126 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_127 = 127 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_128 = 128 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_129 = 129 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_130 = 130 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_131 = 131 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_132 = 132 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_133 = 133 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_134 = 134 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_135 = 135 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_136 = 136 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_137 = 137 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_138 = 138 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_139 = 139 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_140 = 140 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_141 = 141 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_142 = 142 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_143 = 143 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_144 = 144 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_145 = 145 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_146 = 146 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_147 = 147 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_148 = 148 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_149 = 149 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_150 = 150 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_151 = 151 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_152 = 152 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_153 = 153 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_154 = 154 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_155 = 155 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_156 = 156 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_157 = 157 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_158 = 158 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_159 = 159 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_160 = 160 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_161 = 161 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_162 = 162 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_163 = 163 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_164 = 164 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_165 = 165 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_166 = 166 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_167 = 167 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_168 = 168 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_169 = 169 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_170 = 170 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_171 = 171 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_172 = 172 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_173 = 173 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_174 = 174 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_175 = 175 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_176 = 176 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_177 = 177 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_178 = 178 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_179 = 179 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_180 = 180 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_181 = 181 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_182 = 182 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_183 = 183 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_184 = 184 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_185 = 185 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_186 = 186 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_187 = 187 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_188 = 188 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_189 = 189 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_190 = 190 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_191 = 191 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_192 = 192 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_193 = 193 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_194 = 194 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_195 = 195 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_196 = 196 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_197 = 197 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_198 = 198 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_199 = 199 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_200 = 200 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_201 = 201 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_202 = 202 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_203 = 203 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_204 = 204 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_205 = 205 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_206 = 206 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_207 = 207 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_208 = 208 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_209 = 209 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_210 = 210 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_211 = 211 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_212 = 212 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_213 = 213 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_214 = 214 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_215 = 215 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_216 = 216 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_217 = 217 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_218 = 218 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_219 = 219 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_220 = 220 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_221 = 221 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_222 = 222 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_223 = 223 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_224 = 224 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_225 = 225 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_226 = 226 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_227 = 227 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_228 = 228 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_229 = 229 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_230 = 230 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_231 = 231 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_232 = 232 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_233 = 233 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_234 = 234 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_235 = 235 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_236 = 236 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_237 = 237 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_238 = 238 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_239 = 239 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_240 = 240 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_241 = 241 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_242 = 242 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_243 = 243 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_244 = 244 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_245 = 245 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_246 = 246 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_247 = 247 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_248 = 248 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_249 = 249 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_250 = 250 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_251 = 251 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_252 = 252 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_253 = 253 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_254 = 254 * PRIME_MODULUS;
+localparam [(N_BITS+8)-1:0] M_255 = 255 * PRIME_MODULUS;
+
+wire signed [(N_BITS+8+1)-1:0] sub_1 = x_times_256 - M_1;
+wire signed [(N_BITS+8+1)-1:0] sub_2 = x_times_256 - M_2;
+wire signed [(N_BITS+8+1)-1:0] sub_3 = x_times_256 - M_3;
+wire signed [(N_BITS+8+1)-1:0] sub_4 = x_times_256 - M_4;
+wire signed [(N_BITS+8+1)-1:0] sub_5 = x_times_256 - M_5;
+wire signed [(N_BITS+8+1)-1:0] sub_6 = x_times_256 - M_6;
+wire signed [(N_BITS+8+1)-1:0] sub_7 = x_times_256 - M_7;
+wire signed [(N_BITS+8+1)-1:0] sub_8 = x_times_256 - M_8;
+wire signed [(N_BITS+8+1)-1:0] sub_9 = x_times_256 - M_9;
+wire signed [(N_BITS+8+1)-1:0] sub_10 = x_times_256 - M_10;
+wire signed [(N_BITS+8+1)-1:0] sub_11 = x_times_256 - M_11;
+wire signed [(N_BITS+8+1)-1:0] sub_12 = x_times_256 - M_12;
+wire signed [(N_BITS+8+1)-1:0] sub_13 = x_times_256 - M_13;
+wire signed [(N_BITS+8+1)-1:0] sub_14 = x_times_256 - M_14;
+wire signed [(N_BITS+8+1)-1:0] sub_15 = x_times_256 - M_15;
+wire signed [(N_BITS+8+1)-1:0] sub_16 = x_times_256 - M_16;
+wire signed [(N_BITS+8+1)-1:0] sub_17 = x_times_256 - M_17;
+wire signed [(N_BITS+8+1)-1:0] sub_18 = x_times_256 - M_18;
+wire signed [(N_BITS+8+1)-1:0] sub_19 = x_times_256 - M_19;
+wire signed [(N_BITS+8+1)-1:0] sub_20 = x_times_256 - M_20;
+wire signed [(N_BITS+8+1)-1:0] sub_21 = x_times_256 - M_21;
+wire signed [(N_BITS+8+1)-1:0] sub_22 = x_times_256 - M_22;
+wire signed [(N_BITS+8+1)-1:0] sub_23 = x_times_256 - M_23;
+wire signed [(N_BITS+8+1)-1:0] sub_24 = x_times_256 - M_24;
+wire signed [(N_BITS+8+1)-1:0] sub_25 = x_times_256 - M_25;
+wire signed [(N_BITS+8+1)-1:0] sub_26 = x_times_256 - M_26;
+wire signed [(N_BITS+8+1)-1:0] sub_27 = x_times_256 - M_27;
+wire signed [(N_BITS+8+1)-1:0] sub_28 = x_times_256 - M_28;
+wire signed [(N_BITS+8+1)-1:0] sub_29 = x_times_256 - M_29;
+wire signed [(N_BITS+8+1)-1:0] sub_30 = x_times_256 - M_30;
+wire signed [(N_BITS+8+1)-1:0] sub_31 = x_times_256 - M_31;
+wire signed [(N_BITS+8+1)-1:0] sub_32 = x_times_256 - M_32;
+wire signed [(N_BITS+8+1)-1:0] sub_33 = x_times_256 - M_33;
+wire signed [(N_BITS+8+1)-1:0] sub_34 = x_times_256 - M_34;
+wire signed [(N_BITS+8+1)-1:0] sub_35 = x_times_256 - M_35;
+wire signed [(N_BITS+8+1)-1:0] sub_36 = x_times_256 - M_36;
+wire signed [(N_BITS+8+1)-1:0] sub_37 = x_times_256 - M_37;
+wire signed [(N_BITS+8+1)-1:0] sub_38 = x_times_256 - M_38;
+wire signed [(N_BITS+8+1)-1:0] sub_39 = x_times_256 - M_39;
+wire signed [(N_BITS+8+1)-1:0] sub_40 = x_times_256 - M_40;
+wire signed [(N_BITS+8+1)-1:0] sub_41 = x_times_256 - M_41;
+wire signed [(N_BITS+8+1)-1:0] sub_42 = x_times_256 - M_42;
+wire signed [(N_BITS+8+1)-1:0] sub_43 = x_times_256 - M_43;
+wire signed [(N_BITS+8+1)-1:0] sub_44 = x_times_256 - M_44;
+wire signed [(N_BITS+8+1)-1:0] sub_45 = x_times_256 - M_45;
+wire signed [(N_BITS+8+1)-1:0] sub_46 = x_times_256 - M_46;
+wire signed [(N_BITS+8+1)-1:0] sub_47 = x_times_256 - M_47;
+wire signed [(N_BITS+8+1)-1:0] sub_48 = x_times_256 - M_48;
+wire signed [(N_BITS+8+1)-1:0] sub_49 = x_times_256 - M_49;
+wire signed [(N_BITS+8+1)-1:0] sub_50 = x_times_256 - M_50;
+wire signed [(N_BITS+8+1)-1:0] sub_51 = x_times_256 - M_51;
+wire signed [(N_BITS+8+1)-1:0] sub_52 = x_times_256 - M_52;
+wire signed [(N_BITS+8+1)-1:0] sub_53 = x_times_256 - M_53;
+wire signed [(N_BITS+8+1)-1:0] sub_54 = x_times_256 - M_54;
+wire signed [(N_BITS+8+1)-1:0] sub_55 = x_times_256 - M_55;
+wire signed [(N_BITS+8+1)-1:0] sub_56 = x_times_256 - M_56;
+wire signed [(N_BITS+8+1)-1:0] sub_57 = x_times_256 - M_57;
+wire signed [(N_BITS+8+1)-1:0] sub_58 = x_times_256 - M_58;
+wire signed [(N_BITS+8+1)-1:0] sub_59 = x_times_256 - M_59;
+wire signed [(N_BITS+8+1)-1:0] sub_60 = x_times_256 - M_60;
+wire signed [(N_BITS+8+1)-1:0] sub_61 = x_times_256 - M_61;
+wire signed [(N_BITS+8+1)-1:0] sub_62 = x_times_256 - M_62;
+wire signed [(N_BITS+8+1)-1:0] sub_63 = x_times_256 - M_63;
+wire signed [(N_BITS+8+1)-1:0] sub_64 = x_times_256 - M_64;
+wire signed [(N_BITS+8+1)-1:0] sub_65 = x_times_256 - M_65;
+wire signed [(N_BITS+8+1)-1:0] sub_66 = x_times_256 - M_66;
+wire signed [(N_BITS+8+1)-1:0] sub_67 = x_times_256 - M_67;
+wire signed [(N_BITS+8+1)-1:0] sub_68 = x_times_256 - M_68;
+wire signed [(N_BITS+8+1)-1:0] sub_69 = x_times_256 - M_69;
+wire signed [(N_BITS+8+1)-1:0] sub_70 = x_times_256 - M_70;
+wire signed [(N_BITS+8+1)-1:0] sub_71 = x_times_256 - M_71;
+wire signed [(N_BITS+8+1)-1:0] sub_72 = x_times_256 - M_72;
+wire signed [(N_BITS+8+1)-1:0] sub_73 = x_times_256 - M_73;
+wire signed [(N_BITS+8+1)-1:0] sub_74 = x_times_256 - M_74;
+wire signed [(N_BITS+8+1)-1:0] sub_75 = x_times_256 - M_75;
+wire signed [(N_BITS+8+1)-1:0] sub_76 = x_times_256 - M_76;
+wire signed [(N_BITS+8+1)-1:0] sub_77 = x_times_256 - M_77;
+wire signed [(N_BITS+8+1)-1:0] sub_78 = x_times_256 - M_78;
+wire signed [(N_BITS+8+1)-1:0] sub_79 = x_times_256 - M_79;
+wire signed [(N_BITS+8+1)-1:0] sub_80 = x_times_256 - M_80;
+wire signed [(N_BITS+8+1)-1:0] sub_81 = x_times_256 - M_81;
+wire signed [(N_BITS+8+1)-1:0] sub_82 = x_times_256 - M_82;
+wire signed [(N_BITS+8+1)-1:0] sub_83 = x_times_256 - M_83;
+wire signed [(N_BITS+8+1)-1:0] sub_84 = x_times_256 - M_84;
+wire signed [(N_BITS+8+1)-1:0] sub_85 = x_times_256 - M_85;
+wire signed [(N_BITS+8+1)-1:0] sub_86 = x_times_256 - M_86;
+wire signed [(N_BITS+8+1)-1:0] sub_87 = x_times_256 - M_87;
+wire signed [(N_BITS+8+1)-1:0] sub_88 = x_times_256 - M_88;
+wire signed [(N_BITS+8+1)-1:0] sub_89 = x_times_256 - M_89;
+wire signed [(N_BITS+8+1)-1:0] sub_90 = x_times_256 - M_90;
+wire signed [(N_BITS+8+1)-1:0] sub_91 = x_times_256 - M_91;
+wire signed [(N_BITS+8+1)-1:0] sub_92 = x_times_256 - M_92;
+wire signed [(N_BITS+8+1)-1:0] sub_93 = x_times_256 - M_93;
+wire signed [(N_BITS+8+1)-1:0] sub_94 = x_times_256 - M_94;
+wire signed [(N_BITS+8+1)-1:0] sub_95 = x_times_256 - M_95;
+wire signed [(N_BITS+8+1)-1:0] sub_96 = x_times_256 - M_96;
+wire signed [(N_BITS+8+1)-1:0] sub_97 = x_times_256 - M_97;
+wire signed [(N_BITS+8+1)-1:0] sub_98 = x_times_256 - M_98;
+wire signed [(N_BITS+8+1)-1:0] sub_99 = x_times_256 - M_99;
+wire signed [(N_BITS+8+1)-1:0] sub_100 = x_times_256 - M_100;
+wire signed [(N_BITS+8+1)-1:0] sub_101 = x_times_256 - M_101;
+wire signed [(N_BITS+8+1)-1:0] sub_102 = x_times_256 - M_102;
+wire signed [(N_BITS+8+1)-1:0] sub_103 = x_times_256 - M_103;
+wire signed [(N_BITS+8+1)-1:0] sub_104 = x_times_256 - M_104;
+wire signed [(N_BITS+8+1)-1:0] sub_105 = x_times_256 - M_105;
+wire signed [(N_BITS+8+1)-1:0] sub_106 = x_times_256 - M_106;
+wire signed [(N_BITS+8+1)-1:0] sub_107 = x_times_256 - M_107;
+wire signed [(N_BITS+8+1)-1:0] sub_108 = x_times_256 - M_108;
+wire signed [(N_BITS+8+1)-1:0] sub_109 = x_times_256 - M_109;
+wire signed [(N_BITS+8+1)-1:0] sub_110 = x_times_256 - M_110;
+wire signed [(N_BITS+8+1)-1:0] sub_111 = x_times_256 - M_111;
+wire signed [(N_BITS+8+1)-1:0] sub_112 = x_times_256 - M_112;
+wire signed [(N_BITS+8+1)-1:0] sub_113 = x_times_256 - M_113;
+wire signed [(N_BITS+8+1)-1:0] sub_114 = x_times_256 - M_114;
+wire signed [(N_BITS+8+1)-1:0] sub_115 = x_times_256 - M_115;
+wire signed [(N_BITS+8+1)-1:0] sub_116 = x_times_256 - M_116;
+wire signed [(N_BITS+8+1)-1:0] sub_117 = x_times_256 - M_117;
+wire signed [(N_BITS+8+1)-1:0] sub_118 = x_times_256 - M_118;
+wire signed [(N_BITS+8+1)-1:0] sub_119 = x_times_256 - M_119;
+wire signed [(N_BITS+8+1)-1:0] sub_120 = x_times_256 - M_120;
+wire signed [(N_BITS+8+1)-1:0] sub_121 = x_times_256 - M_121;
+wire signed [(N_BITS+8+1)-1:0] sub_122 = x_times_256 - M_122;
+wire signed [(N_BITS+8+1)-1:0] sub_123 = x_times_256 - M_123;
+wire signed [(N_BITS+8+1)-1:0] sub_124 = x_times_256 - M_124;
+wire signed [(N_BITS+8+1)-1:0] sub_125 = x_times_256 - M_125;
+wire signed [(N_BITS+8+1)-1:0] sub_126 = x_times_256 - M_126;
+wire signed [(N_BITS+8+1)-1:0] sub_127 = x_times_256 - M_127;
+wire signed [(N_BITS+8+1)-1:0] sub_128 = x_times_256 - M_128;
+wire signed [(N_BITS+8+1)-1:0] sub_129 = x_times_256 - M_129;
+wire signed [(N_BITS+8+1)-1:0] sub_130 = x_times_256 - M_130;
+wire signed [(N_BITS+8+1)-1:0] sub_131 = x_times_256 - M_131;
+wire signed [(N_BITS+8+1)-1:0] sub_132 = x_times_256 - M_132;
+wire signed [(N_BITS+8+1)-1:0] sub_133 = x_times_256 - M_133;
+wire signed [(N_BITS+8+1)-1:0] sub_134 = x_times_256 - M_134;
+wire signed [(N_BITS+8+1)-1:0] sub_135 = x_times_256 - M_135;
+wire signed [(N_BITS+8+1)-1:0] sub_136 = x_times_256 - M_136;
+wire signed [(N_BITS+8+1)-1:0] sub_137 = x_times_256 - M_137;
+wire signed [(N_BITS+8+1)-1:0] sub_138 = x_times_256 - M_138;
+wire signed [(N_BITS+8+1)-1:0] sub_139 = x_times_256 - M_139;
+wire signed [(N_BITS+8+1)-1:0] sub_140 = x_times_256 - M_140;
+wire signed [(N_BITS+8+1)-1:0] sub_141 = x_times_256 - M_141;
+wire signed [(N_BITS+8+1)-1:0] sub_142 = x_times_256 - M_142;
+wire signed [(N_BITS+8+1)-1:0] sub_143 = x_times_256 - M_143;
+wire signed [(N_BITS+8+1)-1:0] sub_144 = x_times_256 - M_144;
+wire signed [(N_BITS+8+1)-1:0] sub_145 = x_times_256 - M_145;
+wire signed [(N_BITS+8+1)-1:0] sub_146 = x_times_256 - M_146;
+wire signed [(N_BITS+8+1)-1:0] sub_147 = x_times_256 - M_147;
+wire signed [(N_BITS+8+1)-1:0] sub_148 = x_times_256 - M_148;
+wire signed [(N_BITS+8+1)-1:0] sub_149 = x_times_256 - M_149;
+wire signed [(N_BITS+8+1)-1:0] sub_150 = x_times_256 - M_150;
+wire signed [(N_BITS+8+1)-1:0] sub_151 = x_times_256 - M_151;
+wire signed [(N_BITS+8+1)-1:0] sub_152 = x_times_256 - M_152;
+wire signed [(N_BITS+8+1)-1:0] sub_153 = x_times_256 - M_153;
+wire signed [(N_BITS+8+1)-1:0] sub_154 = x_times_256 - M_154;
+wire signed [(N_BITS+8+1)-1:0] sub_155 = x_times_256 - M_155;
+wire signed [(N_BITS+8+1)-1:0] sub_156 = x_times_256 - M_156;
+wire signed [(N_BITS+8+1)-1:0] sub_157 = x_times_256 - M_157;
+wire signed [(N_BITS+8+1)-1:0] sub_158 = x_times_256 - M_158;
+wire signed [(N_BITS+8+1)-1:0] sub_159 = x_times_256 - M_159;
+wire signed [(N_BITS+8+1)-1:0] sub_160 = x_times_256 - M_160;
+wire signed [(N_BITS+8+1)-1:0] sub_161 = x_times_256 - M_161;
+wire signed [(N_BITS+8+1)-1:0] sub_162 = x_times_256 - M_162;
+wire signed [(N_BITS+8+1)-1:0] sub_163 = x_times_256 - M_163;
+wire signed [(N_BITS+8+1)-1:0] sub_164 = x_times_256 - M_164;
+wire signed [(N_BITS+8+1)-1:0] sub_165 = x_times_256 - M_165;
+wire signed [(N_BITS+8+1)-1:0] sub_166 = x_times_256 - M_166;
+wire signed [(N_BITS+8+1)-1:0] sub_167 = x_times_256 - M_167;
+wire signed [(N_BITS+8+1)-1:0] sub_168 = x_times_256 - M_168;
+wire signed [(N_BITS+8+1)-1:0] sub_169 = x_times_256 - M_169;
+wire signed [(N_BITS+8+1)-1:0] sub_170 = x_times_256 - M_170;
+wire signed [(N_BITS+8+1)-1:0] sub_171 = x_times_256 - M_171;
+wire signed [(N_BITS+8+1)-1:0] sub_172 = x_times_256 - M_172;
+wire signed [(N_BITS+8+1)-1:0] sub_173 = x_times_256 - M_173;
+wire signed [(N_BITS+8+1)-1:0] sub_174 = x_times_256 - M_174;
+wire signed [(N_BITS+8+1)-1:0] sub_175 = x_times_256 - M_175;
+wire signed [(N_BITS+8+1)-1:0] sub_176 = x_times_256 - M_176;
+wire signed [(N_BITS+8+1)-1:0] sub_177 = x_times_256 - M_177;
+wire signed [(N_BITS+8+1)-1:0] sub_178 = x_times_256 - M_178;
+wire signed [(N_BITS+8+1)-1:0] sub_179 = x_times_256 - M_179;
+wire signed [(N_BITS+8+1)-1:0] sub_180 = x_times_256 - M_180;
+wire signed [(N_BITS+8+1)-1:0] sub_181 = x_times_256 - M_181;
+wire signed [(N_BITS+8+1)-1:0] sub_182 = x_times_256 - M_182;
+wire signed [(N_BITS+8+1)-1:0] sub_183 = x_times_256 - M_183;
+wire signed [(N_BITS+8+1)-1:0] sub_184 = x_times_256 - M_184;
+wire signed [(N_BITS+8+1)-1:0] sub_185 = x_times_256 - M_185;
+wire signed [(N_BITS+8+1)-1:0] sub_186 = x_times_256 - M_186;
+wire signed [(N_BITS+8+1)-1:0] sub_187 = x_times_256 - M_187;
+wire signed [(N_BITS+8+1)-1:0] sub_188 = x_times_256 - M_188;
+wire signed [(N_BITS+8+1)-1:0] sub_189 = x_times_256 - M_189;
+wire signed [(N_BITS+8+1)-1:0] sub_190 = x_times_256 - M_190;
+wire signed [(N_BITS+8+1)-1:0] sub_191 = x_times_256 - M_191;
+wire signed [(N_BITS+8+1)-1:0] sub_192 = x_times_256 - M_192;
+wire signed [(N_BITS+8+1)-1:0] sub_193 = x_times_256 - M_193;
+wire signed [(N_BITS+8+1)-1:0] sub_194 = x_times_256 - M_194;
+wire signed [(N_BITS+8+1)-1:0] sub_195 = x_times_256 - M_195;
+wire signed [(N_BITS+8+1)-1:0] sub_196 = x_times_256 - M_196;
+wire signed [(N_BITS+8+1)-1:0] sub_197 = x_times_256 - M_197;
+wire signed [(N_BITS+8+1)-1:0] sub_198 = x_times_256 - M_198;
+wire signed [(N_BITS+8+1)-1:0] sub_199 = x_times_256 - M_199;
+wire signed [(N_BITS+8+1)-1:0] sub_200 = x_times_256 - M_200;
+wire signed [(N_BITS+8+1)-1:0] sub_201 = x_times_256 - M_201;
+wire signed [(N_BITS+8+1)-1:0] sub_202 = x_times_256 - M_202;
+wire signed [(N_BITS+8+1)-1:0] sub_203 = x_times_256 - M_203;
+wire signed [(N_BITS+8+1)-1:0] sub_204 = x_times_256 - M_204;
+wire signed [(N_BITS+8+1)-1:0] sub_205 = x_times_256 - M_205;
+wire signed [(N_BITS+8+1)-1:0] sub_206 = x_times_256 - M_206;
+wire signed [(N_BITS+8+1)-1:0] sub_207 = x_times_256 - M_207;
+wire signed [(N_BITS+8+1)-1:0] sub_208 = x_times_256 - M_208;
+wire signed [(N_BITS+8+1)-1:0] sub_209 = x_times_256 - M_209;
+wire signed [(N_BITS+8+1)-1:0] sub_210 = x_times_256 - M_210;
+wire signed [(N_BITS+8+1)-1:0] sub_211 = x_times_256 - M_211;
+wire signed [(N_BITS+8+1)-1:0] sub_212 = x_times_256 - M_212;
+wire signed [(N_BITS+8+1)-1:0] sub_213 = x_times_256 - M_213;
+wire signed [(N_BITS+8+1)-1:0] sub_214 = x_times_256 - M_214;
+wire signed [(N_BITS+8+1)-1:0] sub_215 = x_times_256 - M_215;
+wire signed [(N_BITS+8+1)-1:0] sub_216 = x_times_256 - M_216;
+wire signed [(N_BITS+8+1)-1:0] sub_217 = x_times_256 - M_217;
+wire signed [(N_BITS+8+1)-1:0] sub_218 = x_times_256 - M_218;
+wire signed [(N_BITS+8+1)-1:0] sub_219 = x_times_256 - M_219;
+wire signed [(N_BITS+8+1)-1:0] sub_220 = x_times_256 - M_220;
+wire signed [(N_BITS+8+1)-1:0] sub_221 = x_times_256 - M_221;
+wire signed [(N_BITS+8+1)-1:0] sub_222 = x_times_256 - M_222;
+wire signed [(N_BITS+8+1)-1:0] sub_223 = x_times_256 - M_223;
+wire signed [(N_BITS+8+1)-1:0] sub_224 = x_times_256 - M_224;
+wire signed [(N_BITS+8+1)-1:0] sub_225 = x_times_256 - M_225;
+wire signed [(N_BITS+8+1)-1:0] sub_226 = x_times_256 - M_226;
+wire signed [(N_BITS+8+1)-1:0] sub_227 = x_times_256 - M_227;
+wire signed [(N_BITS+8+1)-1:0] sub_228 = x_times_256 - M_228;
+wire signed [(N_BITS+8+1)-1:0] sub_229 = x_times_256 - M_229;
+wire signed [(N_BITS+8+1)-1:0] sub_230 = x_times_256 - M_230;
+wire signed [(N_BITS+8+1)-1:0] sub_231 = x_times_256 - M_231;
+wire signed [(N_BITS+8+1)-1:0] sub_232 = x_times_256 - M_232;
+wire signed [(N_BITS+8+1)-1:0] sub_233 = x_times_256 - M_233;
+wire signed [(N_BITS+8+1)-1:0] sub_234 = x_times_256 - M_234;
+wire signed [(N_BITS+8+1)-1:0] sub_235 = x_times_256 - M_235;
+wire signed [(N_BITS+8+1)-1:0] sub_236 = x_times_256 - M_236;
+wire signed [(N_BITS+8+1)-1:0] sub_237 = x_times_256 - M_237;
+wire signed [(N_BITS+8+1)-1:0] sub_238 = x_times_256 - M_238;
+wire signed [(N_BITS+8+1)-1:0] sub_239 = x_times_256 - M_239;
+wire signed [(N_BITS+8+1)-1:0] sub_240 = x_times_256 - M_240;
+wire signed [(N_BITS+8+1)-1:0] sub_241 = x_times_256 - M_241;
+wire signed [(N_BITS+8+1)-1:0] sub_242 = x_times_256 - M_242;
+wire signed [(N_BITS+8+1)-1:0] sub_243 = x_times_256 - M_243;
+wire signed [(N_BITS+8+1)-1:0] sub_244 = x_times_256 - M_244;
+wire signed [(N_BITS+8+1)-1:0] sub_245 = x_times_256 - M_245;
+wire signed [(N_BITS+8+1)-1:0] sub_246 = x_times_256 - M_246;
+wire signed [(N_BITS+8+1)-1:0] sub_247 = x_times_256 - M_247;
+wire signed [(N_BITS+8+1)-1:0] sub_248 = x_times_256 - M_248;
+wire signed [(N_BITS+8+1)-1:0] sub_249 = x_times_256 - M_249;
+wire signed [(N_BITS+8+1)-1:0] sub_250 = x_times_256 - M_250;
+wire signed [(N_BITS+8+1)-1:0] sub_251 = x_times_256 - M_251;
+wire signed [(N_BITS+8+1)-1:0] sub_252 = x_times_256 - M_252;
+wire signed [(N_BITS+8+1)-1:0] sub_253 = x_times_256 - M_253;
+wire signed [(N_BITS+8+1)-1:0] sub_254 = x_times_256 - M_254;
+wire signed [(N_BITS+8+1)-1:0] sub_255 = x_times_256 - M_255;
+
+assign result = sub_255 >= 0 ? sub_255
+    : sub_254 >= 0 ? sub_254
+    : sub_253 >= 0 ? sub_253
+    : sub_252 >= 0 ? sub_252
+    : sub_251 >= 0 ? sub_251
+    : sub_250 >= 0 ? sub_250
+    : sub_249 >= 0 ? sub_249
+    : sub_248 >= 0 ? sub_248
+    : sub_247 >= 0 ? sub_247
+    : sub_246 >= 0 ? sub_246
+    : sub_245 >= 0 ? sub_245
+    : sub_244 >= 0 ? sub_244
+    : sub_243 >= 0 ? sub_243
+    : sub_242 >= 0 ? sub_242
+    : sub_241 >= 0 ? sub_241
+    : sub_240 >= 0 ? sub_240
+    : sub_239 >= 0 ? sub_239
+    : sub_238 >= 0 ? sub_238
+    : sub_237 >= 0 ? sub_237
+    : sub_236 >= 0 ? sub_236
+    : sub_235 >= 0 ? sub_235
+    : sub_234 >= 0 ? sub_234
+    : sub_233 >= 0 ? sub_233
+    : sub_232 >= 0 ? sub_232
+    : sub_231 >= 0 ? sub_231
+    : sub_230 >= 0 ? sub_230
+    : sub_229 >= 0 ? sub_229
+    : sub_228 >= 0 ? sub_228
+    : sub_227 >= 0 ? sub_227
+    : sub_226 >= 0 ? sub_226
+    : sub_225 >= 0 ? sub_225
+    : sub_224 >= 0 ? sub_224
+    : sub_223 >= 0 ? sub_223
+    : sub_222 >= 0 ? sub_222
+    : sub_221 >= 0 ? sub_221
+    : sub_220 >= 0 ? sub_220
+    : sub_219 >= 0 ? sub_219
+    : sub_218 >= 0 ? sub_218
+    : sub_217 >= 0 ? sub_217
+    : sub_216 >= 0 ? sub_216
+    : sub_215 >= 0 ? sub_215
+    : sub_214 >= 0 ? sub_214
+    : sub_213 >= 0 ? sub_213
+    : sub_212 >= 0 ? sub_212
+    : sub_211 >= 0 ? sub_211
+    : sub_210 >= 0 ? sub_210
+    : sub_209 >= 0 ? sub_209
+    : sub_208 >= 0 ? sub_208
+    : sub_207 >= 0 ? sub_207
+    : sub_206 >= 0 ? sub_206
+    : sub_205 >= 0 ? sub_205
+    : sub_204 >= 0 ? sub_204
+    : sub_203 >= 0 ? sub_203
+    : sub_202 >= 0 ? sub_202
+    : sub_201 >= 0 ? sub_201
+    : sub_200 >= 0 ? sub_200
+    : sub_199 >= 0 ? sub_199
+    : sub_198 >= 0 ? sub_198
+    : sub_197 >= 0 ? sub_197
+    : sub_196 >= 0 ? sub_196
+    : sub_195 >= 0 ? sub_195
+    : sub_194 >= 0 ? sub_194
+    : sub_193 >= 0 ? sub_193
+    : sub_192 >= 0 ? sub_192
+    : sub_191 >= 0 ? sub_191
+    : sub_190 >= 0 ? sub_190
+    : sub_189 >= 0 ? sub_189
+    : sub_188 >= 0 ? sub_188
+    : sub_187 >= 0 ? sub_187
+    : sub_186 >= 0 ? sub_186
+    : sub_185 >= 0 ? sub_185
+    : sub_184 >= 0 ? sub_184
+    : sub_183 >= 0 ? sub_183
+    : sub_182 >= 0 ? sub_182
+    : sub_181 >= 0 ? sub_181
+    : sub_180 >= 0 ? sub_180
+    : sub_179 >= 0 ? sub_179
+    : sub_178 >= 0 ? sub_178
+    : sub_177 >= 0 ? sub_177
+    : sub_176 >= 0 ? sub_176
+    : sub_175 >= 0 ? sub_175
+    : sub_174 >= 0 ? sub_174
+    : sub_173 >= 0 ? sub_173
+    : sub_172 >= 0 ? sub_172
+    : sub_171 >= 0 ? sub_171
+    : sub_170 >= 0 ? sub_170
+    : sub_169 >= 0 ? sub_169
+    : sub_168 >= 0 ? sub_168
+    : sub_167 >= 0 ? sub_167
+    : sub_166 >= 0 ? sub_166
+    : sub_165 >= 0 ? sub_165
+    : sub_164 >= 0 ? sub_164
+    : sub_163 >= 0 ? sub_163
+    : sub_162 >= 0 ? sub_162
+    : sub_161 >= 0 ? sub_161
+    : sub_160 >= 0 ? sub_160
+    : sub_159 >= 0 ? sub_159
+    : sub_158 >= 0 ? sub_158
+    : sub_157 >= 0 ? sub_157
+    : sub_156 >= 0 ? sub_156
+    : sub_155 >= 0 ? sub_155
+    : sub_154 >= 0 ? sub_154
+    : sub_153 >= 0 ? sub_153
+    : sub_152 >= 0 ? sub_152
+    : sub_151 >= 0 ? sub_151
+    : sub_150 >= 0 ? sub_150
+    : sub_149 >= 0 ? sub_149
+    : sub_148 >= 0 ? sub_148
+    : sub_147 >= 0 ? sub_147
+    : sub_146 >= 0 ? sub_146
+    : sub_145 >= 0 ? sub_145
+    : sub_144 >= 0 ? sub_144
+    : sub_143 >= 0 ? sub_143
+    : sub_142 >= 0 ? sub_142
+    : sub_141 >= 0 ? sub_141
+    : sub_140 >= 0 ? sub_140
+    : sub_139 >= 0 ? sub_139
+    : sub_138 >= 0 ? sub_138
+    : sub_137 >= 0 ? sub_137
+    : sub_136 >= 0 ? sub_136
+    : sub_135 >= 0 ? sub_135
+    : sub_134 >= 0 ? sub_134
+    : sub_133 >= 0 ? sub_133
+    : sub_132 >= 0 ? sub_132
+    : sub_131 >= 0 ? sub_131
+    : sub_130 >= 0 ? sub_130
+    : sub_129 >= 0 ? sub_129
+    : sub_128 >= 0 ? sub_128
+    : sub_127 >= 0 ? sub_127
+    : sub_126 >= 0 ? sub_126
+    : sub_125 >= 0 ? sub_125
+    : sub_124 >= 0 ? sub_124
+    : sub_123 >= 0 ? sub_123
+    : sub_122 >= 0 ? sub_122
+    : sub_121 >= 0 ? sub_121
+    : sub_120 >= 0 ? sub_120
+    : sub_119 >= 0 ? sub_119
+    : sub_118 >= 0 ? sub_118
+    : sub_117 >= 0 ? sub_117
+    : sub_116 >= 0 ? sub_116
+    : sub_115 >= 0 ? sub_115
+    : sub_114 >= 0 ? sub_114
+    : sub_113 >= 0 ? sub_113
+    : sub_112 >= 0 ? sub_112
+    : sub_111 >= 0 ? sub_111
+    : sub_110 >= 0 ? sub_110
+    : sub_109 >= 0 ? sub_109
+    : sub_108 >= 0 ? sub_108
+    : sub_107 >= 0 ? sub_107
+    : sub_106 >= 0 ? sub_106
+    : sub_105 >= 0 ? sub_105
+    : sub_104 >= 0 ? sub_104
+    : sub_103 >= 0 ? sub_103
+    : sub_102 >= 0 ? sub_102
+    : sub_101 >= 0 ? sub_101
+    : sub_100 >= 0 ? sub_100
+    : sub_99 >= 0 ? sub_99
+    : sub_98 >= 0 ? sub_98
+    : sub_97 >= 0 ? sub_97
+    : sub_96 >= 0 ? sub_96
+    : sub_95 >= 0 ? sub_95
+    : sub_94 >= 0 ? sub_94
+    : sub_93 >= 0 ? sub_93
+    : sub_92 >= 0 ? sub_92
+    : sub_91 >= 0 ? sub_91
+    : sub_90 >= 0 ? sub_90
+    : sub_89 >= 0 ? sub_89
+    : sub_88 >= 0 ? sub_88
+    : sub_87 >= 0 ? sub_87
+    : sub_86 >= 0 ? sub_86
+    : sub_85 >= 0 ? sub_85
+    : sub_84 >= 0 ? sub_84
+    : sub_83 >= 0 ? sub_83
+    : sub_82 >= 0 ? sub_82
+    : sub_81 >= 0 ? sub_81
+    : sub_80 >= 0 ? sub_80
+    : sub_79 >= 0 ? sub_79
+    : sub_78 >= 0 ? sub_78
+    : sub_77 >= 0 ? sub_77
+    : sub_76 >= 0 ? sub_76
+    : sub_75 >= 0 ? sub_75
+    : sub_74 >= 0 ? sub_74
+    : sub_73 >= 0 ? sub_73
+    : sub_72 >= 0 ? sub_72
+    : sub_71 >= 0 ? sub_71
+    : sub_70 >= 0 ? sub_70
+    : sub_69 >= 0 ? sub_69
+    : sub_68 >= 0 ? sub_68
+    : sub_67 >= 0 ? sub_67
+    : sub_66 >= 0 ? sub_66
+    : sub_65 >= 0 ? sub_65
+    : sub_64 >= 0 ? sub_64
+    : sub_63 >= 0 ? sub_63
+    : sub_62 >= 0 ? sub_62
+    : sub_61 >= 0 ? sub_61
+    : sub_60 >= 0 ? sub_60
+    : sub_59 >= 0 ? sub_59
+    : sub_58 >= 0 ? sub_58
+    : sub_57 >= 0 ? sub_57
+    : sub_56 >= 0 ? sub_56
+    : sub_55 >= 0 ? sub_55
+    : sub_54 >= 0 ? sub_54
+    : sub_53 >= 0 ? sub_53
+    : sub_52 >= 0 ? sub_52
+    : sub_51 >= 0 ? sub_51
+    : sub_50 >= 0 ? sub_50
+    : sub_49 >= 0 ? sub_49
+    : sub_48 >= 0 ? sub_48
+    : sub_47 >= 0 ? sub_47
+    : sub_46 >= 0 ? sub_46
+    : sub_45 >= 0 ? sub_45
+    : sub_44 >= 0 ? sub_44
+    : sub_43 >= 0 ? sub_43
+    : sub_42 >= 0 ? sub_42
+    : sub_41 >= 0 ? sub_41
+    : sub_40 >= 0 ? sub_40
+    : sub_39 >= 0 ? sub_39
+    : sub_38 >= 0 ? sub_38
+    : sub_37 >= 0 ? sub_37
+    : sub_36 >= 0 ? sub_36
+    : sub_35 >= 0 ? sub_35
+    : sub_34 >= 0 ? sub_34
+    : sub_33 >= 0 ? sub_33
+    : sub_32 >= 0 ? sub_32
+    : sub_31 >= 0 ? sub_31
+    : sub_30 >= 0 ? sub_30
+    : sub_29 >= 0 ? sub_29
+    : sub_28 >= 0 ? sub_28
+    : sub_27 >= 0 ? sub_27
+    : sub_26 >= 0 ? sub_26
+    : sub_25 >= 0 ? sub_25
+    : sub_24 >= 0 ? sub_24
+    : sub_23 >= 0 ? sub_23
+    : sub_22 >= 0 ? sub_22
+    : sub_21 >= 0 ? sub_21
+    : sub_20 >= 0 ? sub_20
+    : sub_19 >= 0 ? sub_19
+    : sub_18 >= 0 ? sub_18
+    : sub_17 >= 0 ? sub_17
+    : sub_16 >= 0 ? sub_16
+    : sub_15 >= 0 ? sub_15
+    : sub_14 >= 0 ? sub_14
+    : sub_13 >= 0 ? sub_13
+    : sub_12 >= 0 ? sub_12
+    : sub_11 >= 0 ? sub_11
+    : sub_10 >= 0 ? sub_10
+    : sub_9 >= 0 ? sub_9
+    : sub_8 >= 0 ? sub_8
+    : sub_7 >= 0 ? sub_7
+    : sub_6 >= 0 ? sub_6
+    : sub_5 >= 0 ? sub_5
+    : sub_4 >= 0 ? sub_4
+    : sub_3 >= 0 ? sub_3
+    : sub_2 >= 0 ? sub_2
+    : sub_1 >= 0 ? sub_1
+    : x_times_256;
+
+// assign result = x_times_256 < M_1 ? x_times_256
+// 	: x_times_256 < M_2 ? x_times_256 - M_1
+//     : x_times_256 < M_3 ? x_times_256 - M_2
+//     : x_times_256 < M_4 ? x_times_256 - M_3
+//     : x_times_256 < M_5 ? x_times_256 - M_4
+//     : x_times_256 < M_6 ? x_times_256 - M_5
+//     : x_times_256 < M_7 ? x_times_256 - M_6
+//     : x_times_256 < M_8 ? x_times_256 - M_7
+//     : x_times_256 < M_9 ? x_times_256 - M_8
+//     : x_times_256 < M_10 ? x_times_256 - M_9
+//     : x_times_256 < M_11 ? x_times_256 - M_10
+//     : x_times_256 < M_12 ? x_times_256 - M_11
+//     : x_times_256 < M_13 ? x_times_256 - M_12
+//     : x_times_256 < M_14 ? x_times_256 - M_13
+//     : x_times_256 < M_15 ? x_times_256 - M_14
+//     : x_times_256 < M_16 ? x_times_256 - M_15
+//     : x_times_256 < M_17 ? x_times_256 - M_16
+//     : x_times_256 < M_18 ? x_times_256 - M_17
+//     : x_times_256 < M_19 ? x_times_256 - M_18
+//     : x_times_256 < M_20 ? x_times_256 - M_19
+//     : x_times_256 < M_21 ? x_times_256 - M_20
+//     : x_times_256 < M_22 ? x_times_256 - M_21
+//     : x_times_256 < M_23 ? x_times_256 - M_22
+//     : x_times_256 < M_24 ? x_times_256 - M_23
+//     : x_times_256 < M_25 ? x_times_256 - M_24
+//     : x_times_256 < M_26 ? x_times_256 - M_25
+//     : x_times_256 < M_27 ? x_times_256 - M_26
+//     : x_times_256 < M_28 ? x_times_256 - M_27
+//     : x_times_256 < M_29 ? x_times_256 - M_28
+//     : x_times_256 < M_30 ? x_times_256 - M_29
+//     : x_times_256 < M_31 ? x_times_256 - M_30
+//     : x_times_256 < M_32 ? x_times_256 - M_31
+//     : x_times_256 < M_33 ? x_times_256 - M_32
+//     : x_times_256 < M_34 ? x_times_256 - M_33
+//     : x_times_256 < M_35 ? x_times_256 - M_34
+//     : x_times_256 < M_36 ? x_times_256 - M_35
+//     : x_times_256 < M_37 ? x_times_256 - M_36
+//     : x_times_256 < M_38 ? x_times_256 - M_37
+//     : x_times_256 < M_39 ? x_times_256 - M_38
+//     : x_times_256 < M_40 ? x_times_256 - M_39
+//     : x_times_256 < M_41 ? x_times_256 - M_40
+//     : x_times_256 < M_42 ? x_times_256 - M_41
+//     : x_times_256 < M_43 ? x_times_256 - M_42
+//     : x_times_256 < M_44 ? x_times_256 - M_43
+//     : x_times_256 < M_45 ? x_times_256 - M_44
+//     : x_times_256 < M_46 ? x_times_256 - M_45
+//     : x_times_256 < M_47 ? x_times_256 - M_46
+//     : x_times_256 < M_48 ? x_times_256 - M_47
+//     : x_times_256 < M_49 ? x_times_256 - M_48
+//     : x_times_256 < M_50 ? x_times_256 - M_49
+//     : x_times_256 < M_51 ? x_times_256 - M_50
+//     : x_times_256 < M_52 ? x_times_256 - M_51
+//     : x_times_256 < M_53 ? x_times_256 - M_52
+//     : x_times_256 < M_54 ? x_times_256 - M_53
+//     : x_times_256 < M_55 ? x_times_256 - M_54
+//     : x_times_256 < M_56 ? x_times_256 - M_55
+//     : x_times_256 < M_57 ? x_times_256 - M_56
+//     : x_times_256 < M_58 ? x_times_256 - M_57
+//     : x_times_256 < M_59 ? x_times_256 - M_58
+//     : x_times_256 < M_60 ? x_times_256 - M_59
+//     : x_times_256 < M_61 ? x_times_256 - M_60
+//     : x_times_256 < M_62 ? x_times_256 - M_61
+//     : x_times_256 < M_63 ? x_times_256 - M_62
+//     : x_times_256 < M_64 ? x_times_256 - M_63
+//     : x_times_256 < M_65 ? x_times_256 - M_64
+//     : x_times_256 < M_66 ? x_times_256 - M_65
+//     : x_times_256 < M_67 ? x_times_256 - M_66
+//     : x_times_256 < M_68 ? x_times_256 - M_67
+//     : x_times_256 < M_69 ? x_times_256 - M_68
+//     : x_times_256 < M_70 ? x_times_256 - M_69
+//     : x_times_256 < M_71 ? x_times_256 - M_70
+//     : x_times_256 < M_72 ? x_times_256 - M_71
+//     : x_times_256 < M_73 ? x_times_256 - M_72
+//     : x_times_256 < M_74 ? x_times_256 - M_73
+//     : x_times_256 < M_75 ? x_times_256 - M_74
+//     : x_times_256 < M_76 ? x_times_256 - M_75
+//     : x_times_256 < M_77 ? x_times_256 - M_76
+//     : x_times_256 < M_78 ? x_times_256 - M_77
+//     : x_times_256 < M_79 ? x_times_256 - M_78
+//     : x_times_256 < M_80 ? x_times_256 - M_79
+//     : x_times_256 < M_81 ? x_times_256 - M_80
+//     : x_times_256 < M_82 ? x_times_256 - M_81
+//     : x_times_256 < M_83 ? x_times_256 - M_82
+//     : x_times_256 < M_84 ? x_times_256 - M_83
+//     : x_times_256 < M_85 ? x_times_256 - M_84
+//     : x_times_256 < M_86 ? x_times_256 - M_85
+//     : x_times_256 < M_87 ? x_times_256 - M_86
+//     : x_times_256 < M_88 ? x_times_256 - M_87
+//     : x_times_256 < M_89 ? x_times_256 - M_88
+//     : x_times_256 < M_90 ? x_times_256 - M_89
+//     : x_times_256 < M_91 ? x_times_256 - M_90
+//     : x_times_256 < M_92 ? x_times_256 - M_91
+//     : x_times_256 < M_93 ? x_times_256 - M_92
+//     : x_times_256 < M_94 ? x_times_256 - M_93
+//     : x_times_256 < M_95 ? x_times_256 - M_94
+//     : x_times_256 < M_96 ? x_times_256 - M_95
+//     : x_times_256 < M_97 ? x_times_256 - M_96
+//     : x_times_256 < M_98 ? x_times_256 - M_97
+//     : x_times_256 < M_99 ? x_times_256 - M_98
+//     : x_times_256 < M_100 ? x_times_256 - M_99
+//     : x_times_256 < M_101 ? x_times_256 - M_100
+//     : x_times_256 < M_102 ? x_times_256 - M_101
+//     : x_times_256 < M_103 ? x_times_256 - M_102
+//     : x_times_256 < M_104 ? x_times_256 - M_103
+//     : x_times_256 < M_105 ? x_times_256 - M_104
+//     : x_times_256 < M_106 ? x_times_256 - M_105
+//     : x_times_256 < M_107 ? x_times_256 - M_106
+//     : x_times_256 < M_108 ? x_times_256 - M_107
+//     : x_times_256 < M_109 ? x_times_256 - M_108
+//     : x_times_256 < M_110 ? x_times_256 - M_109
+//     : x_times_256 < M_111 ? x_times_256 - M_110
+//     : x_times_256 < M_112 ? x_times_256 - M_111
+//     : x_times_256 < M_113 ? x_times_256 - M_112
+//     : x_times_256 < M_114 ? x_times_256 - M_113
+//     : x_times_256 < M_115 ? x_times_256 - M_114
+//     : x_times_256 < M_116 ? x_times_256 - M_115
+//     : x_times_256 < M_117 ? x_times_256 - M_116
+//     : x_times_256 < M_118 ? x_times_256 - M_117
+//     : x_times_256 < M_119 ? x_times_256 - M_118
+//     : x_times_256 < M_120 ? x_times_256 - M_119
+//     : x_times_256 < M_121 ? x_times_256 - M_120
+//     : x_times_256 < M_122 ? x_times_256 - M_121
+//     : x_times_256 < M_123 ? x_times_256 - M_122
+//     : x_times_256 < M_124 ? x_times_256 - M_123
+//     : x_times_256 < M_125 ? x_times_256 - M_124
+//     : x_times_256 < M_126 ? x_times_256 - M_125
+//     : x_times_256 < M_127 ? x_times_256 - M_126
+//     : x_times_256 < M_128 ? x_times_256 - M_127
+//     : x_times_256 < M_129 ? x_times_256 - M_128
+//     : x_times_256 < M_130 ? x_times_256 - M_129
+//     : x_times_256 < M_131 ? x_times_256 - M_130
+//     : x_times_256 < M_132 ? x_times_256 - M_131
+//     : x_times_256 < M_133 ? x_times_256 - M_132
+//     : x_times_256 < M_134 ? x_times_256 - M_133
+//     : x_times_256 < M_135 ? x_times_256 - M_134
+//     : x_times_256 < M_136 ? x_times_256 - M_135
+//     : x_times_256 < M_137 ? x_times_256 - M_136
+//     : x_times_256 < M_138 ? x_times_256 - M_137
+//     : x_times_256 < M_139 ? x_times_256 - M_138
+//     : x_times_256 < M_140 ? x_times_256 - M_139
+//     : x_times_256 < M_141 ? x_times_256 - M_140
+//     : x_times_256 < M_142 ? x_times_256 - M_141
+//     : x_times_256 < M_143 ? x_times_256 - M_142
+//     : x_times_256 < M_144 ? x_times_256 - M_143
+//     : x_times_256 < M_145 ? x_times_256 - M_144
+//     : x_times_256 < M_146 ? x_times_256 - M_145
+//     : x_times_256 < M_147 ? x_times_256 - M_146
+//     : x_times_256 < M_148 ? x_times_256 - M_147
+//     : x_times_256 < M_149 ? x_times_256 - M_148
+//     : x_times_256 < M_150 ? x_times_256 - M_149
+//     : x_times_256 < M_151 ? x_times_256 - M_150
+//     : x_times_256 < M_152 ? x_times_256 - M_151
+//     : x_times_256 < M_153 ? x_times_256 - M_152
+//     : x_times_256 < M_154 ? x_times_256 - M_153
+//     : x_times_256 < M_155 ? x_times_256 - M_154
+//     : x_times_256 < M_156 ? x_times_256 - M_155
+//     : x_times_256 < M_157 ? x_times_256 - M_156
+//     : x_times_256 < M_158 ? x_times_256 - M_157
+//     : x_times_256 < M_159 ? x_times_256 - M_158
+//     : x_times_256 < M_160 ? x_times_256 - M_159
+//     : x_times_256 < M_161 ? x_times_256 - M_160
+//     : x_times_256 < M_162 ? x_times_256 - M_161
+//     : x_times_256 < M_163 ? x_times_256 - M_162
+//     : x_times_256 < M_164 ? x_times_256 - M_163
+//     : x_times_256 < M_165 ? x_times_256 - M_164
+//     : x_times_256 < M_166 ? x_times_256 - M_165
+//     : x_times_256 < M_167 ? x_times_256 - M_166
+//     : x_times_256 < M_168 ? x_times_256 - M_167
+//     : x_times_256 < M_169 ? x_times_256 - M_168
+//     : x_times_256 < M_170 ? x_times_256 - M_169
+//     : x_times_256 < M_171 ? x_times_256 - M_170
+//     : x_times_256 < M_172 ? x_times_256 - M_171
+//     : x_times_256 < M_173 ? x_times_256 - M_172
+//     : x_times_256 < M_174 ? x_times_256 - M_173
+//     : x_times_256 < M_175 ? x_times_256 - M_174
+//     : x_times_256 < M_176 ? x_times_256 - M_175
+//     : x_times_256 < M_177 ? x_times_256 - M_176
+//     : x_times_256 < M_178 ? x_times_256 - M_177
+//     : x_times_256 < M_179 ? x_times_256 - M_178
+//     : x_times_256 < M_180 ? x_times_256 - M_179
+//     : x_times_256 < M_181 ? x_times_256 - M_180
+//     : x_times_256 < M_182 ? x_times_256 - M_181
+//     : x_times_256 < M_183 ? x_times_256 - M_182
+//     : x_times_256 < M_184 ? x_times_256 - M_183
+//     : x_times_256 < M_185 ? x_times_256 - M_184
+//     : x_times_256 < M_186 ? x_times_256 - M_185
+//     : x_times_256 < M_187 ? x_times_256 - M_186
+//     : x_times_256 < M_188 ? x_times_256 - M_187
+//     : x_times_256 < M_189 ? x_times_256 - M_188
+//     : x_times_256 < M_190 ? x_times_256 - M_189
+//     : x_times_256 < M_191 ? x_times_256 - M_190
+//     : x_times_256 < M_192 ? x_times_256 - M_191
+//     : x_times_256 < M_193 ? x_times_256 - M_192
+//     : x_times_256 < M_194 ? x_times_256 - M_193
+//     : x_times_256 < M_195 ? x_times_256 - M_194
+//     : x_times_256 < M_196 ? x_times_256 - M_195
+//     : x_times_256 < M_197 ? x_times_256 - M_196
+//     : x_times_256 < M_198 ? x_times_256 - M_197
+//     : x_times_256 < M_199 ? x_times_256 - M_198
+//     : x_times_256 < M_200 ? x_times_256 - M_199
+//     : x_times_256 < M_201 ? x_times_256 - M_200
+//     : x_times_256 < M_202 ? x_times_256 - M_201
+//     : x_times_256 < M_203 ? x_times_256 - M_202
+//     : x_times_256 < M_204 ? x_times_256 - M_203
+//     : x_times_256 < M_205 ? x_times_256 - M_204
+//     : x_times_256 < M_206 ? x_times_256 - M_205
+//     : x_times_256 < M_207 ? x_times_256 - M_206
+//     : x_times_256 < M_208 ? x_times_256 - M_207
+//     : x_times_256 < M_209 ? x_times_256 - M_208
+//     : x_times_256 < M_210 ? x_times_256 - M_209
+//     : x_times_256 < M_211 ? x_times_256 - M_210
+//     : x_times_256 < M_212 ? x_times_256 - M_211
+//     : x_times_256 < M_213 ? x_times_256 - M_212
+//     : x_times_256 < M_214 ? x_times_256 - M_213
+//     : x_times_256 < M_215 ? x_times_256 - M_214
+//     : x_times_256 < M_216 ? x_times_256 - M_215
+//     : x_times_256 < M_217 ? x_times_256 - M_216
+//     : x_times_256 < M_218 ? x_times_256 - M_217
+//     : x_times_256 < M_219 ? x_times_256 - M_218
+//     : x_times_256 < M_220 ? x_times_256 - M_219
+//     : x_times_256 < M_221 ? x_times_256 - M_220
+//     : x_times_256 < M_222 ? x_times_256 - M_221
+//     : x_times_256 < M_223 ? x_times_256 - M_222
+//     : x_times_256 < M_224 ? x_times_256 - M_223
+//     : x_times_256 < M_225 ? x_times_256 - M_224
+//     : x_times_256 < M_226 ? x_times_256 - M_225
+//     : x_times_256 < M_227 ? x_times_256 - M_226
+//     : x_times_256 < M_228 ? x_times_256 - M_227
+//     : x_times_256 < M_229 ? x_times_256 - M_228
+//     : x_times_256 < M_230 ? x_times_256 - M_229
+//     : x_times_256 < M_231 ? x_times_256 - M_230
+//     : x_times_256 < M_232 ? x_times_256 - M_231
+//     : x_times_256 < M_233 ? x_times_256 - M_232
+//     : x_times_256 < M_234 ? x_times_256 - M_233
+//     : x_times_256 < M_235 ? x_times_256 - M_234
+//     : x_times_256 < M_236 ? x_times_256 - M_235
+//     : x_times_256 < M_237 ? x_times_256 - M_236
+//     : x_times_256 < M_238 ? x_times_256 - M_237
+//     : x_times_256 < M_239 ? x_times_256 - M_238
+//     : x_times_256 < M_240 ? x_times_256 - M_239
+//     : x_times_256 < M_241 ? x_times_256 - M_240
+//     : x_times_256 < M_242 ? x_times_256 - M_241
+//     : x_times_256 < M_243 ? x_times_256 - M_242
+//     : x_times_256 < M_244 ? x_times_256 - M_243
+//     : x_times_256 < M_245 ? x_times_256 - M_244
+//     : x_times_256 < M_246 ? x_times_256 - M_245
+//     : x_times_256 < M_247 ? x_times_256 - M_246
+//     : x_times_256 < M_248 ? x_times_256 - M_247
+//     : x_times_256 < M_249 ? x_times_256 - M_248
+//     : x_times_256 < M_250 ? x_times_256 - M_249
+//     : x_times_256 < M_251 ? x_times_256 - M_250
+//     : x_times_256 < M_252 ? x_times_256 - M_251
+//     : x_times_256 < M_253 ? x_times_256 - M_252
+//     : x_times_256 < M_254 ? x_times_256 - M_253
+//     : x_times_256 < M_255 ? x_times_256 - M_254
+// 	: x_times_256 - M_255;
+
+endmodule

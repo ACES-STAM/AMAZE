@@ -1,0 +1,110 @@
+//  @author : Secure, Trusted, and Assured Microelectronics (STAM) Center
+//
+//  Copyright (c) 2024 STAM Center (SCAI/ASU)
+//  Permission is hereby granted, free of charge, to any person obtaining a copy
+//  of this software and associated documentation files (the "Software"), to deal
+//  in the Software without restriction, including without limitation the rights
+//  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//  copies of the Software, and to permit persons to whom the Software is
+//  furnished to do so, subject to the following conditions:
+//  The above copyright notice and this permission notice shall be included in
+//  all copies or substantial portions of the Software.
+//
+//  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+//  THE SOFTWARE.
+
+
+// Module that performs multiplication between two 256-bit unsigned integers.
+
+// Pipelined design: supports multiple in-flight computations.
+//     - Latency: 5 clock cycles
+//     - Accepts new request in every clock cycle.
+
+module mult_256_sync (
+    input clk,
+    input [256-1:0] num1,
+    input [256-1:0] num2,
+    output [2*256-1:0] product
+);
+
+reg [2*256-1:0] accum [0:31-1];
+
+// Operation logic
+always @(posedge clk) begin
+    accum[15] <= num1 * num2[16*0 +: 16];
+    accum[16] <= num1 * num2[16*1 +: 16];
+    accum[17] <= num1 * num2[16*2 +: 16];
+    accum[18] <= num1 * num2[16*3 +: 16];
+    accum[19] <= num1 * num2[16*4 +: 16];
+    accum[20] <= num1 * num2[16*5 +: 16];
+    accum[21] <= num1 * num2[16*6 +: 16];
+    accum[22] <= num1 * num2[16*7 +: 16];
+    accum[23] <= num1 * num2[16*8 +: 16];
+    accum[24] <= num1 * num2[16*9 +: 16];
+    accum[25] <= num1 * num2[16*10 +: 16];
+    accum[26] <= num1 * num2[16*11 +: 16];
+    accum[27] <= num1 * num2[16*12 +: 16];
+    accum[28] <= num1 * num2[16*13 +: 16];
+    accum[29] <= num1 * num2[16*14 +: 16];
+    accum[30] <= num1 * num2[16*15 +: 16];
+
+    accum[7] <= accum[15] + (accum[16] << (16*1));
+    accum[8] <= accum[17] + (accum[18] << (16*1));
+    accum[9] <= accum[19] + (accum[20] << (16*1));
+    accum[10] <= accum[21] + (accum[22] << (16*1));
+    accum[11] <= accum[23] + (accum[24] << (16*1));
+    accum[12] <= accum[25] + (accum[26] << (16*1));
+    accum[13] <= accum[27] + (accum[28] << (16*1));
+    accum[14] <= accum[29] + (accum[30] << (16*1));
+
+    accum[3] <= accum[7] + (accum[8] << (16*2));
+    accum[4] <= accum[9] + (accum[10] << (16*2));
+    accum[5] <= accum[11] + (accum[12] << (16*2));
+    accum[6] <= accum[13] + (accum[14] << (16*2));
+
+    accum[1] <= accum[3] + (accum[4] << (16*4));
+    accum[2] <= accum[5] + (accum[6] << (16*4));
+
+    accum[0] <= accum[1] + (accum[2] << (16*8));
+
+    // $strobe("[mult_256_sync.v] accum[0]=%h", accum[0]);
+    // $strobe("[mult_256_sync.v] accum[1]=%h", accum[1]);
+    // $strobe("[mult_256_sync.v] accum[2]=%h", accum[2]);
+    // $strobe("[mult_256_sync.v] accum[3]=%h", accum[3]);
+    // $strobe("[mult_256_sync.v] accum[4]=%h", accum[4]);
+    // $strobe("[mult_256_sync.v] accum[5]=%h", accum[5]);
+    // $strobe("[mult_256_sync.v] accum[6]=%h", accum[6]);
+    // $strobe("[mult_256_sync.v] accum[7]=%h", accum[7]);
+    // $strobe("[mult_256_sync.v] accum[8]=%h", accum[8]);
+    // $strobe("[mult_256_sync.v] accum[9]=%h", accum[9]);
+    // $strobe("[mult_256_sync.v] accum[10]=%h", accum[10]);
+    // $strobe("[mult_256_sync.v] accum[11]=%h", accum[11]);
+    // $strobe("[mult_256_sync.v] accum[12]=%h", accum[12]);
+    // $strobe("[mult_256_sync.v] accum[13]=%h", accum[13]);
+    // $strobe("[mult_256_sync.v] accum[14]=%h", accum[14]);
+    // $strobe("[mult_256_sync.v] accum[15]=%h", accum[15]);
+    // $strobe("[mult_256_sync.v] accum[16]=%h", accum[16]);
+    // $strobe("[mult_256_sync.v] accum[17]=%h", accum[17]);
+    // $strobe("[mult_256_sync.v] accum[18]=%h", accum[18]);
+    // $strobe("[mult_256_sync.v] accum[19]=%h", accum[19]);
+    // $strobe("[mult_256_sync.v] accum[20]=%h", accum[20]);
+    // $strobe("[mult_256_sync.v] accum[21]=%h", accum[21]);
+    // $strobe("[mult_256_sync.v] accum[22]=%h", accum[22]);
+    // $strobe("[mult_256_sync.v] accum[23]=%h", accum[23]);
+    // $strobe("[mult_256_sync.v] accum[24]=%h", accum[24]);
+    // $strobe("[mult_256_sync.v] accum[25]=%h", accum[25]);
+    // $strobe("[mult_256_sync.v] accum[26]=%h", accum[26]);
+    // $strobe("[mult_256_sync.v] accum[27]=%h", accum[27]);
+    // $strobe("[mult_256_sync.v] accum[28]=%h", accum[28]);
+    // $strobe("[mult_256_sync.v] accum[29]=%h", accum[29]);
+    // $strobe("[mult_256_sync.v] accum[30]=%h", accum[30]);
+end
+
+assign product = accum[0];
+
+endmodule
